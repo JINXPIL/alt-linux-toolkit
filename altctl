@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2034  # ASSUME_YES/ALTCTL_CONFIG читаются в lib/*.sh
+# =============================================================================
+# altctl — обслуживание ALT Linux одной командой, без привязки к версии.
+#
+# Всё определяется по самой системе: ветка (Sisyphus/p10/p11/...), архитектура,
+# тип ядра, живое зеркало, имена служб в пакетах. Поэтому одна и та же команда
+# работает на старых и новых выпусках и после смены ветки.
+#
+# Использование: sudo altctl [опции] <команда> [аргументы]
+#
+# Команды:
+#   doctor                 диагностика, ничего не меняет
+#   fix                    самовосстановление: блокировки APT, база RPM,
+#                          зависимости, время, место, модули, службы, источники
+#   update                 полное обновление: пакеты + ядро и модули + flatpak
+#   kernel                 только ядро и модули (update-kernel)
+#   maintain               fix + update + контроль служб и экрана (для таймера)
+#   repo [show|auto|set <ветка>|restore]
+#                          источники пакетов: показать / подобрать зеркало /
+#                          сменить ветку / вернуть прежние
+#   install <пакет...>     установка с самовосстановлением; 'a|b' — альтернативы
+#   services               установить и запустить службы из SERVICES
+#   firewall [status|apply|off|show]
+#                          межсетевой экран из настроек FW_*
+#   timer [status|on|off]  автоматическое обслуживание по расписанию
+#   version
+#
+# Опции:
+#   -n, --dry-run          показать, что будет сделано, ничего не меняя
+#   -y, --yes              не задавать вопросов
+#   -c, --config <файл>    другой файл настроек (по умолчанию /etc/altctl.conf)
+#   -h, --help             эта справка
+# =============================================================================
+set -uo pipefail
+
+ALTCTL_HOME="$(cd -- "$(dirname -- "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+for _m in common detect repo heal update services firewall timer doctor; do
+    # shellcheck source=/dev/null
+    source "$ALTCTL_HOME/lib/$_m.sh" || { echo "altctl: не найден $ALTCTL_HOME/lib/$_m.sh" >&2; exit 1; }
+done
+unset _m
+
+usage() { awk '/^# =+$/ { if (++n == 2) exit; next } n == 1 { sub(/^# ?/, ""); print }' "$ALTCTL_HOME/altctl"; }
+
+main() {
+    while (( $# )); do
+        case $1 in
+            -n|--dry-run) DRY_RUN=1 ;;
+            -y|--yes)     ASSUME_YES=1 ;;
+            -c|--config)  ALTCTL_CONFIG=${2:?укажите файл}; shift ;;
+            -h|--help)    usage; return 0 ;;
+            -*)           die "Неизвестная опция: $1 (altctl --help)" ;;
+            *)            break ;;
+        esac
+        shift
+    done
+    local cmd=${1:-doctor}
+    (( $# )) && shift
+
+    load_config
+    ALTCTL_TMP=$(mktemp -d)
+    trap 'rm -rf "$ALTCTL_TMP"' EXIT
+
+    case $cmd in
+        version|--version) echo "altctl $ALTCTL_VERSION"; return 0 ;;
+        help) usage; return 0 ;;
+    esac
+
+    is_alt || [[ ${ALTCTL_FORCE:-0} == 1 ]] || die "Это не ALT Linux (нет $ALT_RELEASE). Принудительно: ALTCTL_FORCE=1"
+    [[ $DRY_RUN == 1 ]] && log "режим --dry-run: изменения не вносятся"
+
+    case $cmd in
+        doctor)
+            cmd_doctor ;;
+        fix)
+            need_root "$cmd"; acquire_lock; heal_all ;;
+        update)
+            need_root "$cmd"; acquire_lock; cmd_update ;;
+        kernel)
+            need_root "$cmd"; acquire_lock; cmd_kernel ;;
+        maintain)
+            need_root "$cmd"; acquire_lock
+            heal_all
+            cmd_update ;;
+        repo)
+            case ${1:-show} in
+                show)    repo_show ;;
+                auto)    need_root "$cmd"; acquire_lock; repo_auto ;;
+                set)     need_root "$cmd"; acquire_lock; repo_set "${2:?укажите ветку: p10, p11, Sisyphus}" ;;
+                restore) need_root "$cmd"; acquire_lock; repo_restore ;;
+                *)       die "altctl repo [show|auto|set <ветка>|restore]" ;;
+            esac ;;
+        install)
+            need_root "$cmd"; acquire_lock; cmd_install "$@" ;;
+        services)
+            need_root "$cmd"; acquire_lock; cmd_services ;;
+        firewall)
+            [[ ${1:-status} == status || ${1:-} == show ]] || { need_root "$cmd"; acquire_lock; }
+            cmd_firewall "$@" ;;
+        timer)
+            [[ ${1:-status} == status ]] || need_root "$cmd"
+            cmd_timer "$@" ;;
+        *)
+            die "Неизвестная команда: $cmd (altctl --help)" ;;
+    esac
+
+    print_summary
+    (( FAILS == 0 ))
+}
+
+main "$@"
