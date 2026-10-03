@@ -1,0 +1,14 @@
+# Резервные копии и временные файлы
+*.bak
+*.bak.*
+*.orig
+*.new
+*~
+*.swp
+
+# ОС и редакторы
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
